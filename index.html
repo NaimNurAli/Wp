@@ -60,6 +60,11 @@
             border-radius: inherit;
         }
 
+        /* FIX: Flip local video horizontally so it does not look like a mirror */
+        #local-video {
+            transform: scaleX(-1);
+        }
+
         /* Overlay for controls */
         .controls-overlay {
             position: absolute;
