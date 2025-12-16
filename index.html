@@ -432,7 +432,7 @@
                 remoteVideo.srcObject = remoteStream;
                 callStatusTextEl.classList.add('hidden'); // Hide status text once video arrives
                 
-                // FIX: Ensure remote video plays to address visibility issue
+                // FIX: Ensure remote video plays by aggressively trying to play and muting on failure
                 const playPromise = remoteVideo.play();
                 if (playPromise !== undefined) {
                     playPromise.catch(error => {
@@ -564,6 +564,7 @@
             isFrontCamera = !isFrontCamera;
             
             // Re-acquire the media stream with the new facingMode constraint
+            // This call also correctly updates localVideo.srcObject and plays it
             const newStream = await getMediaStream(MEDIA_CONSTRAINTS);
             
             if (!newStream) {
@@ -608,23 +609,33 @@
                 ? '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M16 21h5v-5"/><path d="M8 21H3v-5"/><path d="M21 3L14 10"/><path d="M3 3l7 7"/><path d="M21 21L14 14"/><path d="M3 21l7-7"/></svg>' 
                 : '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v.01"/><path d="M10 12v.01"/><path d="M16 12v.01"/><path d="M22 12v.01"/><path d="M2 12v.01"/></svg>';
             
-            // In minimized state, controls are generally hidden (like WhatsApp)
+            // Handle control visibility based on state
             if (isMin) {
                 hideControls();
-                // When minimized, allow click to maximize/show controls
-                remoteVideoContainer.onclick = (e) => {
-                    // Prevent propagation if clicking controls while it briefly shows
-                    if (e.target.closest('#call-controls')) return;
-                    toggleMinimize();
-                    showControls();
-                    remoteVideoContainer.onclick = showControls; // Revert back to showControls listener
-                };
             } else {
-                // When maximized, revert back to auto-hide logic
                 showControls();
-                remoteVideoContainer.onclick = showControls;
+            }
+            // Click handling logic is now entirely in handleVideoContainerClick
+        }
+
+        /** Master click handler for video container interaction. */
+        function handleVideoContainerClick(e) {
+            // Clicks inside the controls overlay should be ignored for maximization logic
+            if (e.target.closest('#call-controls')) {
+                showControls(); // Re-up the timeout if they clicked a control
+                return;
+            }
+
+            const isMin = remoteVideoContainer.classList.contains('minimized');
+            if (isMin) {
+                // Clicking when minimized should maximize it.
+                toggleMinimize();
+            } else {
+                // Clicking when full-screen should toggle controls visibility.
+                showControls();
             }
         }
+
 
         // --- Event Listeners ---
         
@@ -636,9 +647,9 @@
         minimizeButton.addEventListener('click', toggleMinimize);
         copyIdButton.addEventListener('click', copyPeerId);
 
-        // Auto-hide/Show controls on video click/tap and mouse movement
-        remoteVideoContainer.addEventListener('click', showControls);
-        remoteVideoContainer.addEventListener('mousemove', showControls);
+        // Master handler for video container interaction
+        remoteVideoContainer.addEventListener('click', handleVideoContainerClick);
+        remoteVideoContainer.addEventListener('mousemove', showControls); // Keep mousemove for control hide trigger
         
         // Initial control hide
         document.addEventListener('DOMContentLoaded', () => {
