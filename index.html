@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Low-Bandwidth Video Call</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Inter font -->
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+    <!-- Load PeerJS library -->
+    <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.2/dist/peerjs.min.js"></script>
+
+    <style>
+        /* Custom styles for video feed and controls */
+        .video-container {
+            position: relative;
+            background-color: #1f2937; /* Dark background */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            width: 100%;
+            height: calc(100vh - 80px); /* Full height minus controls/header */
+            transition: all 0.3s ease-in-out;
+            overflow: hidden;
+            border-radius: 0.75rem;
+        }
+
+        /* Full screen video state */
+        .video-container.full-screen {
+            max-width: 100%;
+            height: 100vh;
+            border-radius: 0;
+            margin: 0;
+            position: fixed;
+            top: 0;
+            left: 0;
+            z-index: 50;
+        }
+
+        /* Minimized (PiP) video state - simulates opening another app */
+        .video-container.minimized {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            width: 160px; /* Small PiP size */
+            height: 240px;
+            z-index: 100; /* Always on top */
+            box-shadow: 0 10px 15px rgba(0, 0, 0, 0.5);
+            cursor: pointer;
+        }
+
+        /* Video element styles */
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover; /* Ensures video fills container without stretching */
+            border-radius: inherit;
+        }
+
+        /* Overlay for controls */
+        .controls-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start; /* Controls at the top */
+            padding: 10px;
+            transition: opacity 0.3s ease-in-out;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.6) 0%, rgba(0,0,0,0) 50%, rgba(0,0,0,0) 100%);
+        }
+
+        .controls-overlay.hidden {
+            opacity: 0;
+            pointer-events: none; /* Allows clicks to pass through when hidden */
+        }
+        
+        .control-button {
+            padding: 8px;
+            border-radius: 50%;
+            background-color: rgba(255, 255, 255, 0.2);
+            color: white;
+            transition: background-color 0.2s;
+            backdrop-filter: blur(5px);
+        }
+
+        .control-button:hover {
+            background-color: rgba(255, 255, 255, 0.4);
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen p-4 flex flex-col items-center">
+
+    <div id="connection-setup" class="bg-white p-6 rounded-xl shadow-lg w-full max-w-sm transition-all duration-300">
+        <h1 class="text-2xl font-bold mb-4 text-gray-800">Peer Call Setup</h1>
+        
+        <!-- Peer ID Display with Copy Button (Now using Indigo) -->
+        <div class="mb-4 text-sm text-gray-600 flex items-center justify-between">
+            <span>Your Peer ID:</span>
+            <div class="flex items-center space-x-2">
+                <span id="my-peer-id" class="font-mono bg-indigo-100 text-indigo-800 px-2 py-1 rounded">Connecting...</span>
+                <button id="copy-id-button" class="p-1 bg-indigo-500 text-white rounded-full hover:bg-indigo-600 transition-colors shadow-md text-xs" title="Copy Peer ID">
+                    <!-- Copy Icon -->
+                    <svg id="copy-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                </button>
+            </div>
+        </div>
+
+        <div class="space-y-4">
+            <input type="text" id="target-peer-id" placeholder="Enter Target Peer ID"
+                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+            
+            <button id="call-button"
+                    class="w-full py-3 bg-green-500 text-white font-semibold rounded-lg shadow-md hover:bg-green-600 transition-colors disabled:opacity-50"
+                    disabled>
+                <span id="call-icon">&#x2197;</span> Call User
+            </button>
+        </div>
+        <p id="status-message" class="mt-4 text-center text-sm text-red-500"></p>
+    </div>
+
+    <!-- Video Call Container -->
+    <div id="video-call-area" class="hidden w-full max-w-4xl mt-4">
+        <div id="remote-video-container" class="video-container full-screen">
+            <video id="remote-video" autoplay playsinline></video>
+            <video id="local-video" autoplay muted playsinline
+                   class="absolute bottom-4 right-4 w-24 h-32 md:w-32 md:h-40 object-cover bg-black rounded-lg border-2 border-white shadow-xl z-10"></video>
+            
+            <!-- Controls Overlay - positioned at the top -->
+            <div id="call-controls" class="controls-overlay">
+                <div class="flex justify-between w-full">
+                    <!-- Top Left: Minimize Button -->
+                    <button id="minimize-button" class="control-button text-xl">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v.01"/><path d="M10 12v.01"/><path d="M16 12v.01"/><path d="M22 12v.01"/><path d="M2 12v.01"/></svg>
+                    </button>
+
+                    <!-- Top Center: Mute, Camera Toggle, Switch Camera -->
+                    <div class="flex space-x-4">
+                        <button id="mute-button" class="control-button text-xl">
+                            <svg xmlns="http://www.w3.org/2000/svg" id="mic-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+                        </button>
+                        
+                        <button id="camera-toggle-button" class="control-button text-xl">
+                            <svg xmlns="http://www.w3.org/2000/svg" id="camera-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3.5L14.5 4z"/><circle cx="12" cy="13" r="3"/></svg>
+                        </button>
+
+                        <button id="switch-camera-button" class="control-button text-xl">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10l-4 4 4 4"/><path d="M20 10l-4 4-4 4"/><path d="M18 14H4"/></svg>
+                        </button>
+                    </div>
+
+                    <!-- Top Right: Placeholder for future features (e.g., chat) -->
+                    <div class="w-8"></div>
+                </div>
+
+                <!-- Bottom Center: End Call Button (large and red) -->
+                <div class="flex justify-center w-full mt-auto mb-4">
+                    <button id="end-call-button"
+                            class="py-3 px-8 bg-red-600 text-white font-bold rounded-full shadow-lg hover:bg-red-700 transition-colors">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 14h1.5a1.5 1.5 0 0 0 0-3H13v-3.8A5.4 5.4 0 0 0 7.6 2 5.4 5.4 0 0 0 2 7.2v9.6c0 1.2.9 2.1 2.1 2.1h13.8c1.2 0 2.1-.9 2.1-2.1v-3.6c0-1.2-.9-2.1-2.1-2.1H13zM6 10h1v1H6zM6 13h1v1H6z"/></svg>
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Call Status Text -->
+            <div id="call-status-text" class="absolute inset-0 flex items-center justify-center text-white text-xl font-semibold bg-black bg-opacity-50">
+                Awaiting connection...
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        let myPeer;
+        let localStream;
+        let currentCall;
+        let isMuted = false;
+        let isVideoOff = false;
+        let isFrontCamera = true; // For the switch camera logic
+        let controlTimeout;
+
+        // DOM elements
+        const myPeerIdEl = document.getElementById('my-peer-id');
+        const copyIdButton = document.getElementById('copy-id-button');
+        const targetPeerIdInput = document.getElementById('target-peer-id');
+        const callButton = document.getElementById('call-button');
+        const endCallButton = document.getElementById('end-call-button');
+        const muteButton = document.getElementById('mute-button');
+        const cameraToggleButton = document.getElementById('camera-toggle-button');
+        const switchCameraButton = document.getElementById('switch-camera-button');
+        const minimizeButton = document.getElementById('minimize-button');
+        const setupDiv = document.getElementById('connection-setup');
+        const videoAreaDiv = document.getElementById('video-call-area');
+        const remoteVideoContainer = document.getElementById('remote-video-container');
+        const localVideo = document.getElementById('local-video');
+        const remoteVideo = document.getElementById('remote-video');
+        const callControls = document.getElementById('call-controls');
+        const statusMessageEl = document.getElementById('status-message');
+        const callStatusTextEl = document.getElementById('call-status-text');
+
+        // --- Configuration for Low Bandwidth ---
+        const MEDIA_CONSTRAINTS = {
+            audio: true,
+            // Max resolution 720p (1280x720) and max frame rate 30fps
+            video: {
+                width: { ideal: 1280, max: 1280 }, 
+                height: { ideal: 720, max: 720 },
+                frameRate: { max: 30 }
+            }
+        };
+
+        // --- Utility Functions ---
+
+        /** Fetches media stream with specified constraints. */
+        async function getMediaStream(constraints) {
+            try {
+                // Determine which camera to use
+                const videoConstraints = {
+                    ...constraints.video,
+                    facingMode: isFrontCamera ? 'user' : { exact: 'environment' }
+                };
+                
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: constraints.audio,
+                    video: videoConstraints
+                });
+                
+                // If a stream already exists, stop its tracks
+                if (localStream) {
+                    localStream.getTracks().forEach(track => track.stop());
+                }
+                localStream = stream;
+                localVideo.srcObject = stream;
+                return stream;
+
+            } catch (err) {
+                console.error("Error accessing media devices:", err);
+                statusMessageEl.textContent = "Error: Could not access camera/mic. Check permissions.";
+                return null;
+            }
+        }
+
+        /** Hides the call controls after a timeout. */
+        function hideControls() {
+            callControls.classList.add('hidden');
+        }
+
+        /** Shows controls and sets a timeout to hide them. */
+        function showControls() {
+            callControls.classList.remove('hidden');
+            clearTimeout(controlTimeout);
+            controlTimeout = setTimeout(hideControls, 4000); // Hide after 4 seconds
+        }
+
+        /** Switches the UI to the video call view. */
+        function showCallUI() {
+            setupDiv.classList.add('hidden');
+            videoAreaDiv.classList.remove('hidden');
+            callStatusTextEl.textContent = "Connecting...";
+            remoteVideoContainer.classList.add('full-screen');
+            remoteVideoContainer.classList.remove('minimized');
+            showControls();
+        }
+
+        /** Resets the UI back to the connection setup view. */
+        function resetUI() {
+            // Stop tracks
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+            }
+            localStream = null;
+            currentCall = null;
+            localVideo.srcObject = null;
+            remoteVideo.srcObject = null;
+            isMuted = false;
+            isVideoOff = false;
+            
+            // Reset UI
+            setupDiv.classList.remove('hidden');
+            videoAreaDiv.classList.add('hidden');
+            // Ensure status message is not reset immediately if it's an error/end message
+            if (!statusMessageEl.textContent.includes("ended") && !statusMessageEl.textContent.includes("error")) {
+                statusMessageEl.textContent = "";
+            }
+            callStatusTextEl.textContent = "";
+            muteButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" id="mic-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>';
+            cameraToggleButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" id="camera-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3.5L14.5 4z"/><circle cx="12" cy="13" r="3"/></svg>';
+            callButton.disabled = true;
+            targetPeerIdInput.value = '';
+        }
+
+        // --- PeerJS and Call Logic ---
+
+        /** Initializes the PeerJS connection. */
+        function initializePeer() {
+            // Use default PeerJS cloud server for simplicity
+            myPeer = new Peer({
+                // To avoid CORS issues, we just use the default options, relying on the public PeerServer.
+            });
+
+            myPeer.on('open', (id) => {
+                myPeerIdEl.textContent = id;
+                callButton.disabled = false;
+                statusMessageEl.textContent = "Ready. Share your ID to receive a call.";
+                console.log('My Peer ID:', id);
+
+                // Start listening for incoming calls
+                listenForCalls();
+            });
+
+            myPeer.on('error', (err) => {
+                console.error('PeerJS Error:', err);
+                statusMessageEl.textContent = `PeerJS Connection Error: ${err.type}. Try reloading.`;
+            });
+        }
+
+        /** Listens for incoming calls and prompts user to answer. */
+        function listenForCalls() {
+            myPeer.on('call', async (call) => {
+                console.log('Incoming call from:', call.peer);
+
+                // Using window.confirm as a simple custom modal replacement since alert() is forbidden.
+                const answer = window.confirm(`Incoming call from ID: ${call.peer}. Accept?`);
+                
+                if (answer) {
+                    currentCall = call;
+                    const stream = await getMediaStream(MEDIA_CONSTRAINTS);
+                    if (!stream) {
+                        return; // Cannot answer without stream
+                    }
+                    
+                    showCallUI();
+                    
+                    // Answer the call with the local stream
+                    call.answer(stream);
+                    
+                    // Set up event listener for the remote stream
+                    setupRemoteStreamListener(call);
+                } else {
+                    // Optionally close the call if rejected
+                    call.close();
+                }
+            });
+        }
+
+        /** Initiates a call to a target ID. */
+        async function startCall() {
+            const targetId = targetPeerIdInput.value.trim();
+            if (!targetId || targetId === myPeer.id) {
+                statusMessageEl.textContent = "Please enter a valid target ID different from your own.";
+                return;
+            }
+
+            const stream = await getMediaStream(MEDIA_CONSTRAINTS);
+            if (!stream) {
+                return;
+            }
+
+            showCallUI();
+            statusMessageEl.textContent = "";
+
+            try {
+                const call = myPeer.call(targetId, stream);
+                currentCall = call;
+                console.log('Starting call to:', targetId);
+                
+                setupRemoteStreamListener(call);
+            } catch (error) {
+                console.error("Error during call initiation:", error);
+                statusMessageEl.textContent = "Could not initiate call. Target ID may be invalid or offline.";
+                resetUI();
+            }
+        }
+
+        /** Sets up listeners for remote stream and call events. */
+        function setupRemoteStreamListener(call) {
+            call.on('stream', (remoteStream) => {
+                console.log('Received remote stream.');
+                remoteVideo.srcObject = remoteStream;
+                callStatusTextEl.classList.add('hidden'); // Hide status text once video arrives
+                remoteVideo.onloadedmetadata = () => remoteVideo.play();
+            });
+
+            call.on('close', () => {
+                console.log('Call closed by peer.');
+                statusMessageEl.textContent = 'Call ended by the other user.';
+                resetUI();
+            });
+
+            call.on('error', (err) => {
+                console.error('Call Error:', err);
+                statusMessageEl.textContent = 'A call error occurred: ' + err.message;
+                resetUI();
+            });
+        }
+
+        /** Ends the current call. */
+        function endCall() {
+            if (currentCall) {
+                currentCall.close();
+                currentCall = null;
+            }
+            resetUI();
+        }
+
+        /** Copies the Peer ID to the clipboard using the recommended execCommand fallback. */
+        function copyPeerId() {
+            const peerId = myPeerIdEl.textContent;
+
+            // 1. Create a temporary textarea element
+            const tempInput = document.createElement('textarea');
+            tempInput.value = peerId;
+            // Make it invisible and off-screen
+            tempInput.style.position = 'absolute';
+            tempInput.style.left = '-9999px';
+            document.body.appendChild(tempInput);
+            
+            // 2. Select the text
+            tempInput.select();
+            tempInput.setSelectionRange(0, 99999); // For mobile devices
+
+            let success = false;
+            try {
+                // 3. Execute the copy command
+                success = document.execCommand('copy');
+            } catch (err) {
+                console.error('Copy failed:', err);
+            }
+            
+            // 4. Clean up
+            document.body.removeChild(tempInput);
+            
+            if (success) {
+                // Visual feedback: Change icon to checkmark and button color to green
+                const originalIconHtml = copyIdButton.innerHTML;
+                copyIdButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'; // Checkmark
+                // Use indigo as the original color
+                copyIdButton.classList.replace('bg-indigo-500', 'bg-green-500'); 
+
+                // Revert after 1.5 seconds
+                setTimeout(() => {
+                    copyIdButton.innerHTML = originalIconHtml;
+                    // Revert to indigo
+                    copyIdButton.classList.replace('bg-green-500', 'bg-indigo-500');
+                    // Reset status message if it hasn't changed
+                    if (statusMessageEl.textContent === "Peer ID copied to clipboard!") {
+                        statusMessageEl.textContent = "Ready. Share your ID to receive a call.";
+                    }
+                }, 1500);
+                
+                statusMessageEl.textContent = "Peer ID copied to clipboard!";
+            } else {
+                statusMessageEl.textContent = "Could not copy ID automatically. Please copy manually.";
+            }
+        }
+
+        // --- Control Handlers ---
+
+        /** Toggles audio mute/unmute. */
+        function toggleMute() {
+            if (!localStream) return;
+            isMuted = !isMuted;
+            localStream.getAudioTracks().forEach(track => track.enabled = !isMuted);
+
+            // Update UI icon
+            const iconHtml = isMuted
+                ? '<svg xmlns="http://www.w3.org/2000/svg" id="mic-off-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M9 9v3a3 3 0 0 0 6 0v-1"/><path d="M16 8V5a4 4 0 0 0-7.2-2.3M5 10v2a7 7 0 0 0 12.8 1.4"/><line x1="12" x2="12" y1="19" y2="22"/></svg>'
+                : '<svg xmlns="http://www.w3.org/2000/svg" id="mic-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>';
+            muteButton.innerHTML = iconHtml;
+            showControls(); // Show controls on interaction
+        }
+
+        /** Toggles video on/off. */
+        function toggleCamera() {
+            if (!localStream) return;
+            isVideoOff = !isVideoOff;
+            localStream.getVideoTracks().forEach(track => track.enabled = !isVideoOff);
+
+            // Update UI icon
+            const iconHtml = isVideoOff
+                ? '<svg xmlns="http://www.w3.org/2000/svg" id="camera-off-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 2l20 20"/><path d="M4.5 9.5l3.5 3.5M7 7H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3.5L14.5 4h-5z"/><circle cx="12" cy="13" r="3"/><path d="M17.5 7h-5l-2.5 3.5"/></svg>'
+                : '<svg xmlns="http://www.w3.org/2000/svg" id="camera-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3.5L14.5 4z"/><circle cx="12" cy="13" r="3"/></svg>';
+            cameraToggleButton.innerHTML = iconHtml;
+            showControls(); // Show controls on interaction
+        }
+        
+        /** Switches between front and back camera (if available). */
+        async function switchCamera() {
+            if (!currentCall) return;
+
+            isFrontCamera = !isFrontCamera;
+            
+            // Re-acquire the media stream with the new facingMode constraint
+            const newStream = await getMediaStream(MEDIA_CONSTRAINTS);
+            if (!newStream) {
+                isFrontCamera = !isFrontCamera; // Revert on failure
+                return;
+            }
+
+            // Replace the track in the current call for both ends
+            const videoTrack = newStream.getVideoTracks()[0];
+            const sender = currentCall.peerConnection.getSenders().find((s) => s.track.kind === 'video');
+
+            if (sender) {
+                sender.replaceTrack(videoTrack)
+                    .then(() => {
+                        console.log("Video track replaced successfully.");
+                        statusMessageEl.textContent = "Camera switched.";
+                        setTimeout(() => statusMessageEl.textContent = "Ready. Share your ID to receive a call.", 1500);
+                        // Keep track enabled state
+                        videoTrack.enabled = !isVideoOff;
+                    })
+                    .catch((err) => {
+                        console.error("Error replacing video track:", err);
+                        statusMessageEl.textContent = "Could not switch camera. Device may not support it.";
+                    });
+            } else {
+                console.warn("Could not find video sender to replace track.");
+            }
+            showControls(); // Show controls on interaction
+        }
+
+        /** Toggles between full screen and minimized (PiP) view. */
+        function toggleMinimize() {
+            remoteVideoContainer.classList.toggle('minimized');
+            remoteVideoContainer.classList.toggle('full-screen');
+            
+            // Change the minimize button icon based on state
+            const isMin = remoteVideoContainer.classList.contains('minimized');
+            minimizeButton.innerHTML = isMin 
+                ? '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M16 21h5v-5"/><path d="M8 21H3v-5"/><path d="M21 3L14 10"/><path d="M3 3l7 7"/><path d="M21 21L14 14"/><path d="M3 21l7-7"/></svg>' 
+                : '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v.01"/><path d="M10 12v.01"/><path d="M16 12v.01"/><path d="M22 12v.01"/><path d="M2 12v.01"/></svg>';
+            
+            // In minimized state, controls are generally hidden (like WhatsApp)
+            if (isMin) {
+                hideControls();
+                // When minimized, allow click to maximize/show controls
+                remoteVideoContainer.onclick = (e) => {
+                    // Prevent propagation if clicking controls while it briefly shows
+                    if (e.target.closest('#call-controls')) return;
+                    toggleMinimize();
+                    showControls();
+                    remoteVideoContainer.onclick = showControls; // Revert back to showControls listener
+                };
+            } else {
+                // When maximized, revert back to auto-hide logic
+                showControls();
+                remoteVideoContainer.onclick = showControls;
+            }
+        }
+
+        // --- Event Listeners ---
+        
+        callButton.addEventListener('click', startCall);
+        endCallButton.addEventListener('click', endCall);
+        muteButton.addEventListener('click', toggleMute);
+        cameraToggleButton.addEventListener('click', toggleCamera);
+        switchCameraButton.addEventListener('click', switchCamera);
+        minimizeButton.addEventListener('click', toggleMinimize);
+        copyIdButton.addEventListener('click', copyPeerId);
+
+        // Auto-hide/Show controls on video click/tap and mouse movement
+        remoteVideoContainer.addEventListener('click', showControls);
+        remoteVideoContainer.addEventListener('mousemove', showControls);
+        
+        // Initial control hide
+        document.addEventListener('DOMContentLoaded', () => {
+            initializePeer();
+        });
+
+    </script>
+</body>
+</html>
