@@ -52,17 +52,55 @@
             cursor: pointer;
         }
 
-        /* Video element styles */
+        /* Video element styles - Base styling */
         video {
-            width: 100%;
-            height: 100%;
-            object-fit: cover; /* Ensures video fills container without stretching */
+            object-fit: cover;
             border-radius: inherit;
+            transition: all 0.3s ease-in-out;
+            cursor: pointer; /* Enable clicking on video feeds */
         }
 
-        /* FIX: Flip local video horizontally so it does not look like a mirror */
-        #local-video {
+        /* Video element for the main, large view */
+        .video-main {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 5;
+        }
+
+        /* Video element for the small, preview (PiP) view */
+        .video-preview {
+            position: absolute;
+            bottom: 16px;
+            right: 16px;
+            width: 96px; 
+            height: 128px;
+            
+            /* Responsive sizes for tablet/desktop */
+            /* Using standard Tailwind utility values here for reference: */
+            /* @media (min-width: 768px) { width: 128px; height: 160px; } */
+
+            object-fit: cover;
+            background-color: black;
+            border: 2px solid white;
+            border-radius: 0.75rem;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+            z-index: 10;
+        }
+
+        /* Fix: Flip local video horizontally so it does not look like a mirror when it is the main (user-facing) camera */
+        #local-video.video-main {
             transform: scaleX(-1);
+        }
+        /* Ensure local video in preview mode is also flipped */
+        #local-video.video-preview {
+            transform: scaleX(-1);
+        }
+        /* Remote video should never be flipped */
+        #remote-video {
+            transform: none !important;
         }
 
         /* Overlay for controls */
@@ -151,9 +189,9 @@
     <!-- Video Call Container -->
     <div id="video-call-area" class="hidden w-full max-w-4xl mt-4">
         <div id="remote-video-container" class="video-container full-screen">
-            <video id="remote-video" autoplay playsinline></video>
-            <video id="local-video" autoplay muted playsinline
-                   class="absolute bottom-4 right-4 w-24 h-32 md:w-32 md:h-40 object-cover bg-black rounded-lg border-2 border-white shadow-xl z-10"></video>
+            <!-- Initial state: remote-video is main, local-video is preview -->
+            <video id="remote-video" autoplay playsinline class="video-main"></video>
+            <video id="local-video" autoplay muted playsinline class="video-preview"></video>
             
             <!-- Controls Overlay - positioned at the top -->
             <div id="call-controls" class="controls-overlay">
@@ -206,6 +244,7 @@
         let isMuted = false;
         let isVideoOff = false;
         let isFrontCamera = true; // For the switch camera logic
+        let isLocalVideoMaximized = false; // New state for video swap
         let controlTimeout;
 
         // DOM elements
@@ -231,6 +270,7 @@
         const MEDIA_CONSTRAINTS = {
             audio: true,
             // Max resolution 720p (1280x720) and max frame rate 30fps
+            // WebRTC will automatically throttle resolution and bitrate if bandwidth is low.
             video: {
                 width: { ideal: 1280, max: 1280 }, 
                 height: { ideal: 720, max: 720 },
@@ -282,6 +322,10 @@
                 localStream = stream;
                 localVideo.srcObject = stream;
                 localVideo.play(); // Ensure local video autoplays
+                
+                // FIX: Ensure audio tracks are explicitly enabled initially
+                localStream.getAudioTracks().forEach(track => track.enabled = !isMuted);
+                
                 return stream;
 
             } catch (err) {
@@ -316,6 +360,15 @@
             remoteVideoContainer.classList.remove('minimized');
             updateControlButtonsUI();
             showControls();
+            
+            // Set initial video classes
+            isLocalVideoMaximized = false;
+            localVideo.classList.remove('video-main');
+            localVideo.classList.add('video-preview');
+            remoteVideo.classList.remove('video-preview');
+            remoteVideo.classList.add('video-main');
+            localVideo.muted = true;
+            remoteVideo.muted = false;
         }
 
         /** Resets the UI back to the connection setup view. */
@@ -330,6 +383,7 @@
             remoteVideo.srcObject = null;
             isMuted = false;
             isVideoOff = false;
+            isLocalVideoMaximized = false;
             
             // Reset UI
             setupDiv.classList.remove('hidden');
@@ -350,6 +404,9 @@
 
         /** Initializes the PeerJS connection. */
         function initializePeer() {
+            if (myPeer && !myPeer.disconnected) {
+                myPeer.destroy();
+            }
             // Use default PeerJS cloud server for simplicity
             myPeer = new Peer({
                 // To avoid CORS issues, we just use the default options, relying on the public PeerServer.
@@ -526,6 +583,37 @@
                 statusMessageEl.textContent = "Could not copy ID automatically. Please copy manually.";
             }
         }
+        
+        /** Swaps the visual size/position of the local and remote video elements. */
+        function swapVideoMaximize() {
+            if (!localVideo.srcObject || !remoteVideo.srcObject) return;
+
+            isLocalVideoMaximized = !isLocalVideoMaximized;
+
+            if (isLocalVideoMaximized) {
+                // Local becomes MAIN (large), Remote becomes PREVIEW (small)
+                localVideo.classList.remove('video-preview');
+                localVideo.classList.add('video-main');
+                remoteVideo.classList.remove('video-main');
+                remoteVideo.classList.add('video-preview');
+                
+                // Mute state must swap
+                localVideo.muted = true; // Still muted for local user (avoids feedback)
+                remoteVideo.muted = false; // Remote audio is still heard
+                
+            } else {
+                // Remote becomes MAIN (large), Local becomes PREVIEW (small)
+                localVideo.classList.remove('video-main');
+                localVideo.classList.add('video-preview');
+                remoteVideo.classList.remove('video-preview');
+                remoteVideo.classList.add('video-main');
+                
+                // Mute state must swap
+                localVideo.muted = true; 
+                remoteVideo.muted = false;
+            }
+            showControls();
+        }
 
         // --- Control Handlers ---
 
@@ -563,13 +651,11 @@
         async function switchCamera() {
             if (!currentCall) return;
 
-            // Simple visual feedback for the switch attempt
             statusMessageEl.textContent = "Attempting to switch camera...";
 
             isFrontCamera = !isFrontCamera;
             
             // Re-acquire the media stream with the new facingMode constraint
-            // This call also correctly updates localVideo.srcObject and plays it
             const newStream = await getMediaStream(MEDIA_CONSTRAINTS);
             
             if (!newStream) {
@@ -620,7 +706,6 @@
             } else {
                 showControls();
             }
-            // Click handling logic is now entirely in handleVideoContainerClick
         }
 
         /** Master click handler for video container interaction. */
@@ -628,6 +713,16 @@
             // Clicks inside the controls overlay should be ignored for maximization logic
             if (e.target.closest('#call-controls')) {
                 showControls(); // Re-up the timeout if they clicked a control
+                return;
+            }
+            
+            // If clicking the small preview video, swap it
+            if (e.target.id === 'local-video' && !isLocalVideoMaximized) {
+                swapVideoMaximize();
+                return;
+            }
+            if (e.target.id === 'remote-video' && isLocalVideoMaximized) {
+                swapVideoMaximize();
                 return;
             }
 
